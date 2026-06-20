@@ -2,27 +2,30 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>安安大逃亡</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #0f172a; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Microsoft YaHei', monospace; overflow: hidden; }
-h1 { color: #fbbf24; font-size: 22px; margin-bottom: 6px; letter-spacing: 4px; text-shadow: 0 0 20px #fbbf24; }
-#gameCanvas { border: 3px solid #334155; border-radius: 10px; cursor: crosshair; display: block; touch-action: none; }
-#hintBar { color: #94a3b8; font-size: 12px; margin-top: 6px; text-align: center; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0f172a; font-family: 'Microsoft YaHei', monospace; }
+#wrap { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+#titleBar { color: #fbbf24; font-size: clamp(14px, 3vw, 24px); letter-spacing: 3px; text-shadow: 0 0 16px #fbbf24; padding: 6px 0 4px; flex-shrink: 0; text-align: center; width: 100%; }
+#gameCanvas { display: block; cursor: crosshair; touch-action: none; flex-shrink: 0; }
+#hintBar { color: #64748b; font-size: clamp(10px, 1.8vw, 13px); padding: 3px 0; text-align: center; flex-shrink: 0; }
 #overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.82); display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; z-index:10; }
 #overlay.show { display:flex; }
-#overlayIcon { font-size:64px; }
-#overlayTitle { font-size:32px; font-weight:bold; color:#fff; }
-#overlayMsg { font-size:16px; color:#cbd5e1; }
-#overlayScore { font-size:20px; color:#fbbf24; }
-#restartBtn { margin-top:14px; padding:12px 44px; font-size:18px; font-weight:bold; border:none; border-radius:10px; cursor:pointer; font-family:inherit; letter-spacing:2px; }
+#overlayIcon { font-size: clamp(40px, 8vw, 72px); }
+#overlayTitle { font-size: clamp(22px, 5vw, 36px); font-weight:bold; color:#fff; }
+#overlayMsg { font-size: clamp(13px, 2.5vw, 18px); color:#cbd5e1; }
+#overlayScore { font-size: clamp(16px, 3vw, 22px); color:#fbbf24; }
+#restartBtn { margin-top:14px; padding: clamp(10px,2vw,14px) clamp(28px,5vw,48px); font-size: clamp(15px,3vw,20px); font-weight:bold; border:none; border-radius:10px; cursor:pointer; font-family:inherit; letter-spacing:2px; }
 </style>
 </head>
 <body>
-<h1>🏔️ 安安大逃亡</h1>
-<canvas id="gameCanvas"></canvas>
-<div id="hintBar">👆 点击移动安安 | 点击怪物射击 | 靠近山洞点击进入 | 洞内自动捡子弹</div>
+<div id="wrap">
+  <div id="titleBar">🏔️ 安安大逃亡</div>
+  <canvas id="gameCanvas"></canvas>
+  <div id="hintBar">👆 点击移动安安 | 点击怪物射击 | 靠近山洞点击进入 | 洞内自动捡子弹</div>
+</div>
 <div id="overlay">
   <div id="overlayIcon">🏆</div>
   <div id="overlayTitle">恭喜安安！</div>
@@ -34,17 +37,41 @@ h1 { color: #fbbf24; font-size: 22px; margin-bottom: 6px; letter-spacing: 4px; t
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-// 屏幕大小
-const VW = Math.min(window.innerWidth - 8, 860);
-const VH = Math.min(window.innerHeight - 100, 560);
-canvas.width = VW; canvas.height = VH;
+// 动态计算画布尺寸：填满屏幕减去标题和提示栏
+function calcSize() {
+  const titleH = document.getElementById('titleBar').offsetHeight;
+  const hintH = document.getElementById('hintBar').offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight - titleH - hintH - 2;
+  return { vw, vh };
+}
 
-// 世界地图大小（是屏幕3倍）
-const WW = VW * 3;
-const WH = VH * 3;
+let VW, VH;
+function resizeCanvas() {
+  const {vw, vh} = calcSize();
+  VW = vw; VH = vh;
+  canvas.width = VW; canvas.height = VH;
+  canvas.style.width = VW + 'px';
+  canvas.style.height = VH + 'px';
+}
+resizeCanvas();
 
-// 山洞在世界中央
-const CAVE = { x: WW/2, y: WH/2 - 60, r: 55 };
+// 世界地图大小（屏幕3倍），resize后重新计算
+let WW, WH, CAVE;
+function initWorldSize() {
+  WW = VW * 3;
+  WH = VH * 3;
+  CAVE = { x: WW/2, y: WH/2 - 60, r: 55 };
+}
+initWorldSize();
+
+// 窗口resize时重新适配
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  initWorldSize();
+  // 更新摄像机
+  if(G && G.player) updateCamera(G.player.x, G.player.y);
+});
 
 const BULLET_SPEED = 9;
 const BULLET_REGEN = 5000;
