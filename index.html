@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安安大逃亡</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0f172a; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: 'Microsoft YaHei', monospace; overflow: hidden; }
+h1 { color: #fbbf24; font-size: 22px; margin-bottom: 6px; letter-spacing: 4px; text-shadow: 0 0 20px #fbbf24; }
+#gameCanvas { border: 3px solid #334155; border-radius: 10px; cursor: crosshair; display: block; touch-action: none; }
+#hintBar { color: #94a3b8; font-size: 12px; margin-top: 6px; text-align: center; }
+#overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.82); display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; z-index:10; }
+#overlay.show { display:flex; }
+#overlayIcon { font-size:64px; }
+#overlayTitle { font-size:32px; font-weight:bold; color:#fff; }
+#overlayMsg { font-size:16px; color:#cbd5e1; }
+#overlayScore { font-size:20px; color:#fbbf24; }
+#restartBtn { margin-top:14px; padding:12px 44px; font-size:18px; font-weight:bold; border:none; border-radius:10px; cursor:pointer; font-family:inherit; letter-spacing:2px; }
+</style>
+</head>
+<body>
+<h1>🏔️ 安安大逃亡</h1>
+<canvas id="gameCanvas"></canvas>
+<div id="hintBar">👆 点击移动安安 | 点击怪物射击 | 靠近山洞点击进入 | 洞内自动捡子弹</div>
+<div id="overlay">
+  <div id="overlayIcon">🏆</div>
+  <div id="overlayTitle">恭喜安安！</div>
+  <div id="overlayMsg">消灭了所有黑毛球和钻石怪！</div>
+  <div id="overlayScore"></div>
+  <button id="restartBtn" onclick="initGame()">再玩一次</button>
+</div>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// 屏幕大小
+const VW = Math.min(window.innerWidth - 8, 860);
+const VH = Math.min(window.innerHeight - 100, 560);
+canvas.width = VW; canvas.height = VH;
+
+// 世界地图大小（是屏幕3倍）
+const WW = VW * 3;
+const WH = VH * 3;
+
+// 山洞在世界中央
+const CAVE = { x: WW/2, y: WH/2 - 60, r: 55 };
+
+const BULLET_SPEED = 9;
+const BULLET_REGEN = 5000;
+let _id = 0;
+const uid = () => ++_id;
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+const norm = (dx,dy) => { const l=Math.hypot(dx,dy)||1; return [dx/l,dy/l]; };
+
+// 摄像机
+let cam = { x: 0, y: 0 };
+
+function worldToScreen(wx, wy) {
+  return { x: wx - cam.x, y: wy - cam.y };
+}
+function screenToWorld(sx, sy) {
+  return { x: sx + cam.x, y: sy + cam.y };
+}
+
+function updateCamera(px, py) {
+  cam.x = px - VW/2;
+  cam.y = py - VH/2;
+  cam.x = Math.max(0, Math.min(WW - VW, cam.x));
+  cam.y = Math.max(0, Math.min(WH - VH, cam.y));
+}
+
+const randPos = () => {
+  let x, y;
+  do {
+    x = 80 + Math.random() * (WW - 160);
+    y = 80 + Math.random() * (WH - 160);
+  } while (dist({x,y}, CAVE) < 300);
+  return {x, y};
+};
+
+let G = {};
+
+function initGame() {
+  _id = 0;
+  document.getElementById('overlay').classList.remove('show');
+  G = {
+    phase: 'play',
+    tick: 0,
+    score: 0,
+    player: {
+      x: CAVE.x, y: CAVE.y + 100,
+      inCave: false, moving: false,
+      tx: CAVE.x, ty: CAVE.y + 100,
+      invincible: 0,
+    },
+    goldBullets: 0,
+    normalBullets: 0,
+    bullets: [],
+    projectiles: [],
+    pickups: makePickups(),
+    furballs: Array.from({length:3}, (_, i) => ({
+      id:uid(), ...randPos(), hp:100, maxHp:100,
+      weapon:{hp:200,maxHp:200}, speed:0.25, size:24,
+      wanderAngle: Math.random()*Math.PI*2,
+    })),
+    diamonds: Array.from({length:5}, () => ({
+      id:uid(), ...randPos(), hp:10000, maxHp:10000,
+      weapon:{hp:10000,maxHp:10000}, speed:0.175, size:20,
+      cooldown:0, wanderAngle: Math.random()*Math.PI*2,
+    })),
+    triangles: Array.from({length:100}, () => ({
+      id:uid(), ...randPos(), hp:100, maxHp:100,
+      weapon:{hp:50,maxHp:50}, speed:0.35, size:12,
+      aggro:false, wanderAngle: Math.random()*Math.PI*2,
+    })),
+    squares: Array.from({length:10}, () => ({
+      id:uid(), ...randPos(), hp:50, maxHp:50,
+      weapon:{hp:100,maxHp:100}, speed:0.225, size:14,
+      wanderAngle: Math.random()*Math.PI*2,
+    })),
+    warning: '', warningTimer: 0,
+    lastTs: 0,
+  };
+}
+
+function makePickups() {
+  const arr = [];
+  for(let i=0;i<20;i++) arr.push({id:uid(), x:CAVE.x-28+Math.random()*56, y:CAVE.y-20+Math.random()*36, type:'gold', taken:false, regenAt:0});
+  for(let i=0;i<19;i++) arr.push({id:uid(), x:CAVE.x-28+Math.random()*56, y:CAVE.y-20+Math.random()*36, type:'normal', taken:false, regenAt:0});
+  return arr;
+}
+
+// ── 点击输入 ──
+canvas.addEventListener('click', e => {
+  if(G.phase !== 'play') return;
+  const r = canvas.getBoundingClientRect();
+  const sx = (e.clientX - r.left) * (canvas.width / r.width);
+  const sy = (e.clientY - r.top) * (canvas.height / r.height);
+  const {x:wx, y:wy} = screenToWorld(sx, sy);
+
+  const p = G.player;
+
+  // 点击山洞区域
+  if(dist({x:wx,y:wy}, CAVE) < CAVE.r + 20) {
+    if(!p.inCave && dist(p, CAVE) < 130) {
+      p.inCave = true;
+      return;
+    }
+    if(p.inCave) {
+      p.inCave = false;
+      p.x = CAVE.x; p.y = CAVE.y + 100;
+      p.moving = false;
+      p.invincible = 180;
+      return;
+    }
+  }
+
+  if(p.inCave) return;
+
+  // 点击怪物 → 射击
+  const all = [...G.furballs,...G.diamonds,...G.triangles,...G.squares];
+  for(const e of all) {
+    if(dist({x:wx,y:wy}, e) < e.size + 12) {
+      fireBullet(e.x, e.y); return;
+    }
+  }
+
+  // 点击地面 → 移动
+  p.tx = wx; p.ty = wy; p.moving = true;
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  canvas.dispatchEvent(new MouseEvent('click', {clientX:t.clientX, clientY:t.clientY}));
+}, {passive:false});
+
+function fireBullet(tx, ty) {
+  const p = G.player;
+  if(G.goldBullets <= 0 && G.normalBullets <= 0) {
+    G.warning = '没子弹！进山洞补充！'; G.warningTimer = 100; return;
+  }
+  let gold = false;
+  if(G.goldBullets > 0) { G.goldBullets--; gold = true; }
+  else G.normalBullets--;
+  const [dx,dy] = norm(tx - p.x, ty - p.y);
+  G.bullets.push({id:uid(), x:p.x, y:p.y, dx, dy, gold, angle:0});
+}
+
+const inCaveZone = (x,y) => dist({x,y}, CAVE) < CAVE.r * 0.85;
+
+const wander = (e) => {
+  e.wanderAngle += (Math.random()-0.5)*0.14;
+  const nx = e.x + Math.cos(e.wanderAngle)*e.speed;
+  const ny = e.y + Math.sin(e.wanderAngle)*e.speed;
+  if(nx < 30 || nx > WW-30) e.wanderAngle = Math.PI - e.wanderAngle;
+  else if(ny < 30 || ny > WH-30) e.wanderAngle = -e.wanderAngle;
+  else if(!inCaveZone(nx,ny)) { e.x=nx; e.y=ny; }
+  else e.wanderAngle += Math.PI * 0.5;
+};
+
+const moveToward = (e, tx, ty) => {
+  if(inCaveZone(e.x,e.y)) return;
+  const [dx,dy] = norm(tx-e.x, ty-e.y);
+  const nx=e.x+dx*e.speed, ny=e.y+dy*e.speed;
+  if(!inCaveZone(nx,ny)) { e.x=nx; e.y=ny; }
+};
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = Math.min(ts - G.lastTs, 32);
+  G.lastTs = ts;
+  if(G.phase !== 'play') return;
+  G.tick++;
+
+  const p = G.player;
+  if(p.invincible > 0) p.invincible--;
+
+  // 玩家移动
+  if(!p.inCave && p.moving) {
+    const d = dist(p, {x:p.tx,y:p.ty});
+    if(d < 5) { p.moving = false; }
+    else {
+      const [dx,dy] = norm(p.tx-p.x, p.ty-p.y);
+      p.x += dx*3.5; p.y += dy*3.5;
+      p.x = Math.max(20, Math.min(WW-20, p.x));
+      p.y = Math.max(20, Math.min(WH-20, p.y));
+    }
+  }
+
+  updateCamera(p.x, p.y);
+
+  // 危险提示
+  const bossNear = [...G.furballs,...G.diamonds].some(e => dist(e,p)<180);
+  if(!p.inCave && bossNear) { G.warning='危险！快进山洞！'; G.warningTimer=90; }
+  if(G.warningTimer>0) G.warningTimer--; else G.warning='';
+
+  // 进洞捡子弹
+  if(p.inCave) {
+    G.pickups.forEach(pk => {
+      if(!pk.taken) {
+        pk.taken=true; pk.regenAt=ts+BULLET_REGEN;
+        if(pk.type==='gold') G.goldBullets++; else G.normalBullets++;
+      }
+    });
+  }
+  G.pickups.forEach(pk => { if(pk.taken && ts>pk.regenAt) pk.taken=false; });
+
+  // 子弹移动
+  G.bullets = G.bullets.filter(b => dist(b,p) < WW);
+  G.bullets.forEach(b => { b.x+=b.dx*BULLET_SPEED; b.y+=b.dy*BULLET_SPEED; });
+
+  // 钻石抛射物
+  G.projectiles = G.projectiles.filter(b => dist(b,p) < 800);
+  G.projectiles.forEach(b => {
+    b.x+=b.dx*5; b.y+=b.dy*5; b.angle=(b.angle||0)+0.3;
+    if(!p.inCave && !p.invincible && dist(b,p)<16) { G.phase='lose'; showOverlay(false); }
+  });
+
+  // 子弹打怪
+  const dmg = (e, b) => {
+    const d = b.gold ? 1000 : 100;
+    if(e.weapon.hp>0) e.weapon.hp=Math.max(0,e.weapon.hp-d);
+    else e.hp=Math.max(0,e.hp-d);
+    G.score+=10;
+  };
+  G.bullets = G.bullets.filter(b => {
+    let hit=false;
+    [...G.furballs,...G.diamonds,...G.triangles,...G.squares].forEach(e=>{
+      if(!hit && dist(b,e)<e.size+6){dmg(e,b);hit=true;}
+    });
+    return !hit;
+  });
+
+  G.furballs=G.furballs.filter(e=>e.hp>0);
+  G.diamonds=G.diamonds.filter(e=>e.hp>0);
+  G.triangles=G.triangles.filter(e=>e.hp>0);
+  G.squares=G.squares.filter(e=>e.hp>0);
+
+  if(G.furballs.length===0&&G.diamonds.length===0){G.phase='win';showOverlay(true);return;}
+
+  // 怪物移动
+  G.furballs.forEach(e => {
+    if(p.inCave) wander(e);
+    else moveToward(e, CAVE.x, CAVE.y);
+  });
+
+  G.diamonds.forEach(e => {
+    if(p.inCave) { wander(e); return; }
+    moveToward(e, p.x, p.y);
+    e.cooldown--;
+    if(dist(e,p)<250 && e.cooldown<=0) {
+      const [dx,dy]=norm(p.x-e.x,p.y-e.y);
+      G.projectiles.push({id:uid(),x:e.x,y:e.y,dx,dy,angle:0});
+      e.cooldown=80;
+    }
+  });
+
+  G.triangles.forEach(e => {
+    if(p.inCave) { e.aggro=false; wander(e); return; }
+    if(dist(e,p)<220) e.aggro=true;
+    if(e.aggro) moveToward(e,p.x,p.y);
+    else wander(e);
+    if(!p.invincible && dist(e,p)<e.size+12){G.phase='lose';showOverlay(false);}
+  });
+
+  G.squares.forEach(e => {
+    wander(e);
+    if(!p.inCave&&!p.invincible&&dist(e,p)<e.size+12){G.phase='lose';showOverlay(false);}
+  });
+
+  G.furballs.forEach(e=>{
+    if(!p.inCave&&!p.invincible&&dist(e,p)<e.size+12){G.phase='lose';showOverlay(false);}
+  });
+
+  drawScene();
+}
+
+// ── 绘制 ──
+function drawScene() {
+  const p = G.player;
+  ctx.clearRect(0,0,VW,VH);
+  ctx.save();
+  ctx.translate(-cam.x, -cam.y);
+
+  // 天空
+  const sky=ctx.createLinearGradient(cam.x,cam.y,cam.x,cam.y+VH*0.4);
+  sky.addColorStop(0,'#0ea5e9'); sky.addColorStop(1,'#7dd3fc');
+  ctx.fillStyle=sky; ctx.fillRect(cam.x,cam.y,VW,VH*0.4);
+  // 草地
+  const gr=ctx.createLinearGradient(cam.x,cam.y+VH*0.4,cam.x,cam.y+VH);
+  gr.addColorStop(0,'#4ade80'); gr.addColorStop(1,'#15803d');
+  ctx.fillStyle=gr; ctx.fillRect(cam.x,cam.y+VH*0.4,VW,VH*0.6);
+  // 草丛（世界坐标，只画可见范围）
+  ctx.fillStyle='#16a34a';
+  for(let i=0;i<120;i++){
+    const gx=(i*173+7)%WW, gy=VH*0.42+(i*91)%(WH*0.55);
+    if(gx>cam.x-20&&gx<cam.x+VW+20&&gy>cam.y-20&&gy<cam.y+VH+20){
+      ctx.beginPath(); ctx.ellipse(gx,gy,9,3,0,0,Math.PI*2); ctx.fill();
+    }
+  }
+  // 世界边界
+  ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=4; ctx.setLineDash([12,8]);
+  ctx.strokeRect(10,10,WW-20,WH-20);
+  ctx.setLineDash([]);
+
+  drawCave();
+  G.pickups.forEach(pk=>drawPickup(pk));
+  G.furballs.forEach(e=>drawFurball(e));
+  G.diamonds.forEach(e=>drawDiamond(e));
+  G.triangles.forEach(e=>drawTriangle(e));
+  G.squares.forEach(e=>drawSquare(e));
+  G.bullets.forEach(b=>drawBullet(b));
+  G.projectiles.forEach(b=>drawDiamondProj(b));
+
+  if(p.inCave) {
+    // 洞内暗幕
+    ctx.fillStyle='rgba(0,0,0,0.65)';
+    ctx.beginPath(); ctx.arc(CAVE.x,CAVE.y,CAVE.r*0.88,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#fbbf24';
+    ctx.beginPath(); ctx.arc(CAVE.x,CAVE.y,9,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#fef9c3'; ctx.font='bold 13px Microsoft YaHei'; ctx.textAlign='center';
+    ctx.fillText('已捡起子弹！点击山洞退出',CAVE.x,CAVE.y-CAVE.r-12);
+  } else {
+    // 移动指示
+    if(p.moving){
+      ctx.strokeStyle='rgba(251,191,36,0.35)'; ctx.lineWidth=2; ctx.setLineDash([6,5]);
+      ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.tx,p.ty); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='rgba(251,191,36,0.45)';
+      ctx.beginPath(); ctx.arc(p.tx,p.ty,5,0,Math.PI*2); ctx.fill();
+    }
+    // 无敌闪烁
+    if(!p.invincible||Math.floor(p.invincible/8)%2===0) drawStickMan(p.x,p.y,p.moving);
+    if(p.invincible>0){
+      ctx.fillStyle='rgba(251,191,36,0.9)';
+      ctx.beginPath(); ctx.roundRect(p.x-40,p.y-52,80,18,5); ctx.fill();
+      ctx.fillStyle='#000'; ctx.font='bold 11px Microsoft YaHei'; ctx.textAlign='center';
+      ctx.fillText(`🛡️无敌 ${Math.ceil(p.invincible/60)}秒`,p.x,p.y-38);
+    }
+  }
+
+  // 进洞提示
+  if(!p.inCave && dist(p,CAVE)<140){
+    ctx.fillStyle='rgba(16,185,129,0.88)';
+    ctx.beginPath(); ctx.roundRect(CAVE.x-65,CAVE.y+CAVE.r+5,130,24,6); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 13px Microsoft YaHei'; ctx.textAlign='center';
+    ctx.fillText('点击山洞进入',CAVE.x,CAVE.y+CAVE.r+22);
+  }
+
+  ctx.restore();
+
+  // ── HUD（屏幕坐标，不跟随摄像机）──
+  drawHUD();
+  drawMinimap();
+}
+
+function drawCave(){
+  const {x,y,r}=CAVE;
+  ctx.save();
+  ctx.fillStyle='#6b7280';
+  ctx.beginPath(); ctx.ellipse(x,y,r*1.15,r*0.9,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#4b5563';
+  ctx.beginPath(); ctx.ellipse(x-32,y-10,30,22,-0.3,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+36,y-8,28,20,0.3,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111827';
+  ctx.beginPath(); ctx.ellipse(x,y+8,36,30,0,Math.PI,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#92400e'; ctx.fillRect(x+42,y-10,20,14);
+  ctx.strokeStyle='#9ca3af'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(x-46,y-15); ctx.lineTo(x-22,y-32); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPickup(pk){
+  if(pk.taken) return;
+  const s=worldToScreen(pk.x,pk.y);
+  if(s.x<-10||s.x>VW+10||s.y<-10||s.y>VH+10) return;
+  ctx.save(); ctx.translate(pk.x,pk.y);
+  ctx.fillStyle=pk.type==='gold'?'#fbbf24':'#9ca3af';
+  if(pk.type==='gold'){ctx.shadowColor='#fbbf24';ctx.shadowBlur=7;}
+  ctx.beginPath(); ctx.arc(0,0,5,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0; ctx.restore();
+}
+
+function drawMatchStick(x1,y1,x2,y2,withHead){
+  // 木质棍身：浅黄棕色，有纹理感
+  const len = Math.hypot(x2-x1,y2-y1);
+  const ang = Math.atan2(y2-y1,x2-x1);
+  ctx.save();
+  ctx.translate(x1,y1); ctx.rotate(ang);
+  // 棍身渐变
+  const g = ctx.createLinearGradient(0,-2,0,2);
+  g.addColorStop(0,'#d4a96a');
+  g.addColorStop(0.4,'#c8893a');
+  g.addColorStop(1,'#a0662a');
+  ctx.strokeStyle=g; ctx.lineWidth=3.5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(len,0); ctx.stroke();
+  // 木纹线
+  ctx.strokeStyle='rgba(100,60,10,0.25)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(len*0.3,-1.5); ctx.lineTo(len*0.3,1.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(len*0.6,-1.5); ctx.lineTo(len*0.6,1.5); ctx.stroke();
+  if(withHead){
+    // 火柴头：红褐色椭圆
+    ctx.beginPath();
+    ctx.ellipse(0,0,5,4.5,0,0,Math.PI*2);
+    const hg=ctx.createRadialGradient(-1,-1,1,0,0,5);
+    hg.addColorStop(0,'#8b3a2a');
+    hg.addColorStop(1,'#5c1f10');
+    ctx.fillStyle=hg; ctx.fill();
+    ctx.strokeStyle='#3d1008'; ctx.lineWidth=0.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFlame(x,y,ang){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
+  // 外焰
+  ctx.beginPath();
+  ctx.moveTo(0,0);
+  ctx.bezierCurveTo(-6,-8,-8,-18,-2,-28);
+  ctx.bezierCurveTo(0,-22,4,-20,3,-28);
+  ctx.bezierCurveTo(8,-18,6,-8,0,0);
+  ctx.closePath();
+  const fg=ctx.createLinearGradient(0,0,0,-28);
+  fg.addColorStop(0,'#ff6a00');
+  fg.addColorStop(0.5,'#ffb300');
+  fg.addColorStop(1,'#fff176');
+  ctx.fillStyle=fg; ctx.fill();
+  // 内焰
+  ctx.beginPath();
+  ctx.moveTo(0,-2);
+  ctx.bezierCurveTo(-3,-10,-2,-18,0,-22);
+  ctx.bezierCurveTo(2,-18,3,-10,0,-2);
+  ctx.closePath();
+  const fi=ctx.createLinearGradient(0,-2,0,-22);
+  fi.addColorStop(0,'#fff9c4');
+  fi.addColorStop(1,'#fffde7');
+  ctx.fillStyle=fi; ctx.globalAlpha=0.7; ctx.fill();
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+function drawStickMan(x, y, moving) {
+  ctx.save(); ctx.translate(x, y);
+
+  // 行走摆动：tick全局可用，moving控制是否动
+  const t = G.tick * 0.15;
+  const swing = moving ? Math.sin(t) : 0;
+  const bounce = moving ? Math.abs(Math.sin(t)) * 4 : 0;
+
+  ctx.translate(0, -bounce);
+
+  // 头部火柴头
+  ctx.save(); ctx.translate(0, -38);
+  ctx.beginPath(); ctx.ellipse(0,0,5.5,5,0,0,Math.PI*2);
+  const hg=ctx.createRadialGradient(-1,-1,1,0,0,5.5);
+  hg.addColorStop(0,'#8b3a2a'); hg.addColorStop(1,'#5c1f10');
+  ctx.fillStyle=hg; ctx.fill();
+  ctx.strokeStyle='#3d1008'; ctx.lineWidth=0.5; ctx.stroke();
+  ctx.restore();
+
+  // 头到肩
+  drawMatchStick(0,-38, 0,-18, false);
+  // 躯干
+  drawMatchStick(0,-18, 0,6, false);
+
+  // ── 左臂（持枪）：向前时抬起，向后时放下 ──
+  const lArmX = -18 - swing * 6;
+  const lArmY = -4 + swing * 8;
+  drawMatchStick(0,-10, lArmX, lArmY, true);
+  // 枪跟随左臂
+  ctx.save(); ctx.translate(lArmX, lArmY);
+  ctx.rotate(swing * 0.2);
+  ctx.fillStyle='#1f2937';
+  ctx.beginPath(); ctx.roundRect(-18,-4,18,7,2); ctx.fill();
+  ctx.fillStyle='#374151';
+  ctx.beginPath(); ctx.rect(-26,-3,10,4); ctx.fill();
+  ctx.strokeStyle='#4b5563'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(-8,5,4,0,Math.PI); ctx.stroke();
+  ctx.fillStyle='#6b7280';
+  ctx.beginPath(); ctx.rect(-28,-2,4,2); ctx.fill();
+  ctx.restore();
+
+  // ── 右臂（举燃烧火柴，反向摆动）──
+  const rArmX = 16 + swing * 4;
+  const rArmY = -18 - swing * 6;
+  drawMatchStick(0,-10, rArmX, rArmY, false);
+  // 火柴棍延伸
+  const r2X = rArmX + 10;
+  const r2Y = rArmY - 12;
+  drawMatchStick(rArmX, rArmY, r2X, r2Y, true);
+  // 火焰
+  drawFlame(r2X, r2Y, -0.2 + swing * 0.15);
+
+  // ── 左腿（大腿+小腿，与右腿反向）──
+  const lThighX = -12 + swing * 14;
+  const lThighY = 24;
+  drawMatchStick(0,6, lThighX, lThighY, false);
+  const lShinX = lThighX - swing * 8;
+  const lShinY = lThighY + 16;
+  drawMatchStick(lThighX, lThighY, lShinX, lShinY, true);
+
+  // ── 右腿（大腿+小腿，反向摆动）──
+  const rThighX = 12 - swing * 14;
+  const rThighY = 24;
+  drawMatchStick(0,6, rThighX, rThighY, false);
+  const rShinX = rThighX + swing * 8;
+  const rShinY = rThighY + 16;
+  drawMatchStick(rThighX, rThighY, rShinX, rShinY, true);
+
+  ctx.restore();
+}
+
+function drawFurball(e){
+  const s=worldToScreen(e.x,e.y);
+  if(s.x<-60||s.x>VW+60||s.y<-60||s.y>VH+60) return;
+  ctx.save(); ctx.translate(e.x,e.y);
+  const r=e.size;
+  for(let i=0;i<16;i++){
+    const a=(i/16)*Math.PI*2;
+    ctx.beginPath(); ctx.arc(Math.cos(a)*r*0.7,Math.sin(a)*r*0.7,3,0,Math.PI*2);
+    ctx.fillStyle='rgba(20,20,20,0.9)'; ctx.fill();
+  }
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.fillStyle='rgba(15,15,15,0.85)'; ctx.fill();
+  ctx.fillStyle='white';
+  ctx.beginPath(); ctx.arc(-7,-4,5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7,-4,5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111';
+  ctx.beginPath(); ctx.arc(-7,-4,2.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7,-4,2.5,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#92400e'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.moveTo(r,0); ctx.lineTo(r+55,-18); ctx.stroke();
+  ctx.strokeStyle='#222'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(-8,r-4); ctx.lineTo(-12,r+14); ctx.moveTo(8,r-4); ctx.lineTo(12,r+14); ctx.stroke();
+  drawHpBar(e,r+6); if(e.weapon.hp>0) drawWBar(e,r+14,e.weapon.hp/e.weapon.maxHp,'#d97706');
+  ctx.restore();
+}
+
+function drawDiamond(e){
+  const s=worldToScreen(e.x,e.y);
+  if(s.x<-60||s.x>VW+60||s.y<-60||s.y>VH+60) return;
+  ctx.save(); ctx.translate(e.x,e.y); ctx.rotate(Math.sin(G.tick*0.05)*0.15);
+  const r=e.size;
+  ctx.globalAlpha=0.82;
+  ctx.beginPath(); ctx.moveTo(0,-r*1.4); ctx.lineTo(r,0); ctx.lineTo(0,r*1.4); ctx.lineTo(-r,0); ctx.closePath();
+  const g=ctx.createLinearGradient(-r,-r*1.4,r,r*1.4);
+  g.addColorStop(0,'#bfdbfe'); g.addColorStop(0.5,'#3b82f6'); g.addColorStop(1,'#1e3a8a');
+  ctx.fillStyle=g; ctx.fill(); ctx.strokeStyle='#93c5fd'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.moveTo(-r*0.3,-r*0.8); ctx.lineTo(0,-r*0.2); ctx.lineTo(-r*0.5,-r*0.1); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=1;
+  drawHpBar(e,r*1.4+6); if(e.weapon.hp>0) drawWBar(e,r*1.4+14,e.weapon.hp/e.weapon.maxHp,'#1d4ed8');
+  ctx.restore();
+}
+
+function drawTriangle(e){
+  const s=worldToScreen(e.x,e.y);
+  if(s.x<-40||s.x>VW+40||s.y<-40||s.y>VH+40) return;
+  ctx.save(); ctx.translate(e.x,e.y);
+  const sz=e.size;
+  ctx.globalAlpha=0.72;
+  ctx.beginPath(); ctx.moveTo(0,-sz*1.2); ctx.lineTo(sz,sz); ctx.lineTo(-sz,sz); ctx.closePath();
+  ctx.fillStyle='#ef4444'; ctx.fill(); ctx.strokeStyle='#fca5a5'; ctx.lineWidth=1; ctx.stroke();
+  ctx.strokeStyle='#7f1d1d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(sz,-sz*0.3); ctx.lineTo(sz+11,-sz*0.9); ctx.stroke();
+  ctx.globalAlpha=1; ctx.restore();
+}
+
+function drawSquare(e){
+  const s=worldToScreen(e.x,e.y);
+  if(s.x<-40||s.x>VW+40||s.y<-40||s.y>VH+40) return;
+  ctx.save(); ctx.translate(e.x,e.y);
+  const sz=e.size;
+  ctx.globalAlpha=0.72;
+  ctx.fillStyle='#fbbf24'; ctx.strokeStyle='#fef3c7'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.rect(-sz,-sz,sz*2,sz*2); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle='#78350f'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(sz,-sz*0.5); ctx.lineTo(sz+13,-sz); ctx.stroke();
+  ctx.globalAlpha=1; ctx.restore();
+}
+
+function drawBullet(b){
+  const s=worldToScreen(b.x,b.y);
+  if(s.x<-20||s.x>VW+20||s.y<-20||s.y>VH+20) return;
+  ctx.save(); ctx.translate(b.x,b.y);
+  if(b.gold){ctx.fillStyle='#fbbf24';ctx.shadowColor='#fbbf24';ctx.shadowBlur=8;}
+  else ctx.fillStyle='#d1d5db';
+  ctx.beginPath(); ctx.arc(0,0,b.gold?5:3.5,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0; ctx.restore();
+}
+
+function drawDiamondProj(b){
+  ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(b.angle||0);
+  ctx.globalAlpha=0.9; ctx.fillStyle='#60a5fa';
+  ctx.beginPath(); ctx.moveTo(0,-7); ctx.lineTo(5,0); ctx.lineTo(0,7); ctx.lineTo(-5,0); ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=1; ctx.restore();
+}
+
+function drawHpBar(e,off){
+  const bw=36,bh=4;
+  ctx.fillStyle='#374151'; ctx.fillRect(-bw/2,-off-bh,bw,bh);
+  ctx.fillStyle='#22c55e'; ctx.fillRect(-bw/2,-off-bh,bw*(e.hp/e.maxHp),bh);
+}
+function drawWBar(e,off,ratio,color){
+  const bw=36,bh=3;
+  ctx.fillStyle='#374151'; ctx.fillRect(-bw/2,-off-bh,bw,bh);
+  ctx.fillStyle=color; ctx.fillRect(-bw/2,-off-bh,bw*ratio,bh);
+}
+
+function drawHUD(){
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,0.65)';
+  ctx.beginPath(); ctx.roundRect(6,6,240,90,8); ctx.fill();
+  ctx.fillStyle='#fbbf24'; ctx.font='bold 12px Microsoft YaHei'; ctx.textAlign='left';
+  ctx.fillText(`🟡 黄金子弹: ${G.goldBullets}   ⚪ 普通: ${G.normalBullets}`,14,24);
+  ctx.fillStyle='#a3e635'; ctx.font='12px Microsoft YaHei';
+  ctx.fillText(`得分: ${G.score}`,14,42);
+  ctx.fillStyle='#f87171';
+  ctx.fillText(`🖤 黑毛球: ${G.furballs.length}/3   💎 钻石怪: ${G.diamonds.length}/5`,14,58);
+  ctx.fillStyle='#fb923c';
+  ctx.fillText(`🔺 三角: ${G.triangles.length}/100   🟨 方怪: ${G.squares.length}/10`,14,74);
+  ctx.fillStyle='#94a3b8'; ctx.font='11px Microsoft YaHei';
+  ctx.fillText('消灭黑毛球和钻石怪获胜！',14,88);
+
+  if(G.warning && G.warningTimer>0){
+    ctx.fillStyle='rgba(220,38,38,0.88)';
+    ctx.beginPath(); ctx.roundRect(VW/2-130,VH-52,260,34,8); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 13px Microsoft YaHei'; ctx.textAlign='center';
+    ctx.fillText(G.warning,VW/2,VH-29);
+  }
+  ctx.restore();
+}
+
+// 小地图
+function drawMinimap(){
+  const mw=120, mh=80, mx=VW-mw-8, my=8;
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.beginPath(); ctx.roundRect(mx,my,mw,mh,6); ctx.fill();
+  ctx.strokeStyle='#475569'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(mx,my,mw,mh,6); ctx.stroke();
+
+  const sx = x => mx + (x/WW)*mw;
+  const sy = y => my + (y/WH)*mh;
+
+  // 山洞
+  ctx.fillStyle='#6b7280';
+  ctx.beginPath(); ctx.arc(sx(CAVE.x),sy(CAVE.y),4,0,Math.PI*2); ctx.fill();
+
+  // 怪物
+  G.furballs.forEach(e=>{ctx.fillStyle='#111';ctx.beginPath();ctx.arc(sx(e.x),sy(e.y),3,0,Math.PI*2);ctx.fill();});
+  G.diamonds.forEach(e=>{ctx.fillStyle='#3b82f6';ctx.beginPath();ctx.arc(sx(e.x),sy(e.y),2.5,0,Math.PI*2);ctx.fill();});
+  G.triangles.filter(e=>e.aggro).forEach(e=>{ctx.fillStyle='#ef4444';ctx.beginPath();ctx.arc(sx(e.x),sy(e.y),1.5,0,Math.PI*2);ctx.fill();});
+
+  // 玩家
+  const p=G.player;
+  ctx.fillStyle='#fbbf24';
+  ctx.beginPath(); ctx.arc(sx(p.x),sy(p.y),3.5,0,Math.PI*2); ctx.fill();
+
+  // 视野框
+  ctx.strokeStyle='rgba(251,191,36,0.5)'; ctx.lineWidth=1;
+  ctx.strokeRect(sx(cam.x),sy(cam.y),(VW/WW)*mw,(VH/WH)*mh);
+
+  ctx.fillStyle='#94a3b8'; ctx.font='9px monospace'; ctx.textAlign='center';
+  ctx.fillText('小地图',mx+mw/2,my+mh+12);
+  ctx.restore();
+}
+
+function showOverlay(win){
+  const el=document.getElementById('overlay');
+  document.getElementById('overlayIcon').textContent=win?'🏆':'💀';
+  document.getElementById('overlayTitle').textContent=win?'恭喜安安！':'安安被打倒了！';
+  document.getElementById('overlayMsg').textContent=win?'消灭了所有大BOSS！':'躲避怪物，多进山洞补子弹！';
+  document.getElementById('overlayScore').textContent=`得分: ${G.score}`;
+  const btn=document.getElementById('restartBtn');
+  btn.textContent=win?'再玩一次':'重新开始';
+  btn.style.background=win?'#059669':'#dc2626';
+  el.classList.add('show');
+}
+
+initGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
